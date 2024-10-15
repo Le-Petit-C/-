@@ -4,6 +4,8 @@
 #include <cmath>
 #include <memory>
 #include <windows.h>
+#include <conio.h>
+#include <tuple>
 #pragma comment(lib, "gdiplus.lib")
 #define GDIPVER 0x0110
 #include <gdiplus.h>
@@ -20,7 +22,9 @@ struct GdiplusInitlizeStruct {
 	}
 };
 
-int GetEncoderClsid(const WCHAR* format, CLSID* pClsid)
+wchar_t outputfile[MAX_PATH + 1] = L"output.png";
+
+static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid)
 {
 	UINT  num = 0;          // number of image encoders
 	UINT  size = 0;         // size of the image encoder array in bytes
@@ -39,7 +43,10 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid)
 
 	for (UINT j = 0; j < num; ++j)
 	{
+#pragma  warning( push ) 
+#pragma  warning( disable: 6385 )
 		if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0)
+#pragma  warning(  pop  ) 
 		{
 			*pClsid = pImageCodecInfo[j].Clsid;
 			free(pImageCodecInfo);
@@ -178,28 +185,37 @@ static uint32_t getRealColor(uint32_t color1, uint32_t color2, uint32_t bkcolor1
 	return ret;
 }
 
-int main() {
-	GdiplusInitlizeStruct GdiplusInit;
-	wchar_t buffer[MAX_PATH + 1];
+static Gdiplus::Status savepng(Gdiplus::Image& img) {
+	CLSID encoderClsid;
+	int result;
+	result = GetEncoderClsid(L"image/png", &encoderClsid);
+	if (result < 0) {
+		printf("The PNG encoder is not installed.\n");
+		return Gdiplus::GenericError;
+	}
+	return img.Save(outputfile, &encoderClsid, nullptr);
+}
+
+//向用户索要一个路径并打开为bitmap，参数：提示词
+static Gdiplus::Bitmap* requestBitmap(const char* text) {
+	printf("%s", text);
+	while (true) {
+		wchar_t buffer[MAX_PATH + 1];
+		scanf_s("%w[^\n]%*c", buffer, MAX_PATH + 1);
+		std::unique_ptr<Gdiplus::Bitmap> bmp(Gdiplus::Bitmap::FromFile(buffer));
+		if (bmp->GetLastStatus() == Gdiplus::Ok) return bmp.release();
+		printf("打开失败！请重新输入：");
+	}
+}
+
+static void regenerateAlpha() {
 	Gdiplus::ARGB color;
-	printf("请输入图片1路径：");
-	scanf_s("%w[^\n]%*c", buffer, MAX_PATH + 1);
-	std::unique_ptr<Gdiplus::Bitmap> bmp1(Gdiplus::Bitmap::FromFile(buffer));
-	if (bmp1->GetLastStatus() != Gdiplus::Ok) {
-		printf("打开图片1失败！");
-		return 0;
-	}
-	printf("请输入图片2路径：");
-	scanf_s("%w[^\n]%*c", buffer, MAX_PATH + 1);
-	std::unique_ptr<Gdiplus::Bitmap> bmp2(Gdiplus::Bitmap::FromFile(buffer));
-	if (bmp2->GetLastStatus() != Gdiplus::Ok) {
-		printf("打开图片1失败！");
-		return 0;
-	}
+	std::unique_ptr<Gdiplus::Bitmap> bmp1(requestBitmap("请输入图片1路径："));
+	std::unique_ptr<Gdiplus::Bitmap> bmp2(requestBitmap("请输入图片2路径："));
 
 	if (bmp1->GetWidth() != bmp2->GetWidth() || bmp1->GetHeight() != bmp2->GetHeight()) {
 		printf("失败！图片长宽不一致");
-		return 0;
+		return;
 	}
 
 	printf("请输入图片1中的背景色(16进制，ARGB，如ffff0000表示完全不透明的红色):");
@@ -220,23 +236,76 @@ int main() {
 		uint32_t* result = (uint32_t*)((uint8_t*)bmpdata.Scan0 + bmpdata.Stride * a)
 			, * input1 = (uint32_t*)((uint8_t*)bmp1data.Scan0 + bmp1data.Stride * a)
 			, * input2 = (uint32_t*)((uint8_t*)bmp2data.Scan0 + bmp2data.Stride * a);
-		for (size_t b = 0; b < rect.Width; ++b) {
-			/*if (a == 843 && b == 1036)
-				__debugbreak();*/
+		for (size_t b = 0; b < rect.Width; ++b)
 			*result++ = getRealColor(*input1++, *input2++, color1, color2);
-		}
 	}
 	bmp2->UnlockBits(&bmp2data);
 	bmp1->UnlockBits(&bmp1data);
 	bmp.UnlockBits(&bmpdata);
 	printf("保存输出图片中...\n");
-	CLSID encoderClsid;
-	int result;
-	result = GetEncoderClsid(L"image/png", &encoderClsid);
-	if (result < 0){
-		printf("The PNG encoder is not installed.\n");
-		return 0;
+	if (savepng(bmp) != Gdiplus::Ok)
+		printf("保存失败！\n");
+	else printf("完成！\n");
+}
+
+static void eraseBlackBack() {
+	std::unique_ptr<Gdiplus::Bitmap> bmp(requestBitmap("请输入图片路径："));
+	Gdiplus::Rect rect = { 0, 0, (int)bmp->GetWidth(), (int)bmp->GetHeight() };
+	Gdiplus::BitmapData bmpdata;
+	bmp->LockBits(&rect, Gdiplus::ImageLockModeRead | Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bmpdata);
+	for (size_t a = 0; a < bmpdata.Height; ++a) {
+		uint8_t* data = (uint8_t*)bmpdata.Scan0 + a * bmpdata.Stride;
+		for (size_t b = 0; b < bmpdata.Width; ++b) {
+#undef max
+			uint8_t maxcolor = std::max(data[0], std::max(data[1], data[2]));
+			for (int i = 0; i < 3; ++i)
+				data[i] = maxcolor ? (uint16_t)data[i] * 255 / maxcolor : 0;
+			data[3] = (uint16_t)data[3] * maxcolor / 255;
+			data += 4;
+		}
 	}
-	bmp.Save(L"output.png", &encoderClsid, nullptr);
-	printf("完成！\n");
+	bmp->UnlockBits(&bmpdata);
+	printf("保存输出图片中...\n");
+	if (savepng(*bmp) != Gdiplus::Ok)
+		printf("保存失败！\n");
+	else printf("完成！\n");
+}
+
+int main() {
+	GdiplusInitlizeStruct GdiplusInit;
+	while (true) {
+		printf("请输入你想用的功能：\n");
+		printf("0:退出\n");
+		printf("1:功能帮助(占位，其实尚未实现qwq)\n");
+		printf("2:恢复图片透明度\n");
+		printf("3:去掉黑色背景\n");
+	switchagain:
+		char c = _getch();
+		switch (c) {
+		case '0':
+			putchar('\n');
+			printf("按任意键退出。\n");
+			std::ignore = _getch();
+			return 0;
+		case '1':
+			printf("部分功能说明：\n");
+			printf("功能\"3:\"：\n");
+			printf("在以黑色为背景仍能显示出原图的前提下尽可能降低图片不透明度\n");
+			printf("按任意键继续。\n");
+			std::ignore = _getch();
+			break;
+		case '2':
+			putchar('\n');
+			regenerateAlpha();
+			break;
+		case '3':
+			putchar('\n');
+			eraseBlackBack();
+			break;
+		default:
+			printf("\r不合法的输入！请重新输入。");
+			goto switchagain;
+		}
+		putchar('\n');
+	}
 }
